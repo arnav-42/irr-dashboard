@@ -15,7 +15,7 @@ st.set_page_config(page_title="Wealthstone", layout="wide")
 LOGO = "logo.png"
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Authentication (field disappears once the user is verified)
+# Authentication
 # ───────────────────────────────────────────────────────────────────────────────
 if "authenticated" not in st.session_state:
     box = st.empty()
@@ -32,7 +32,7 @@ if "authenticated" not in st.session_state:
 def load_dsts():
     dsts = {}
     sections = sorted([k for k in st.secrets if k.startswith("dst")],
-                      key=lambda s: int(s[3:]))  # dst1 → 1
+                      key=lambda s: int(s[3:]))
     for idx, sect in enumerate(sections, 1):
         data = st.secrets[sect]
         dsts[f"DST {idx}"] = {
@@ -77,7 +77,7 @@ def rebalance(changed_key):
     else:
         curr_val = {k: vals[k] for k in targets}
         total_c  = sum(curr_val.values())
-        if total_c <= 0 or abs(diff) > total_c:
+        if total_c <= 0 or abs(diff) >= total_c:
             for k in targets:
                 st.session_state[f"alloc_{k}"] = 0.0
             st.session_state[f"alloc_{changed_key}"] = 100.0 - locked_sum
@@ -93,17 +93,14 @@ def reset_all():
 
 st.sidebar.button("Reset to equal weight", on_click=reset_all)
 
-# initialize locks & allocations once
 for k in dst_keys:
     if f"lock_{k}" not in st.session_state:
         st.session_state[f"lock_{k}"] = False
     if f"alloc_{k}" not in st.session_state:
         st.session_state[f"alloc_{k}"] = dst_static[k]["equity"] / TOTAL_EQUITY * 100
 
-# one collapsible block per DST
 for k in dst_keys:
-    with st.sidebar.expander(dst_static[k]["name"], expanded=True):
-        # slider
+    with st.sidebar.expander(dst_static[k]["name"], expanded=False):
         pct = st.slider(
             label=f"{dst_static[k]['name']} (%)",
             min_value=0.0,
@@ -114,18 +111,13 @@ for k in dst_keys:
             args=(k,),
             disabled=st.session_state[f"lock_{k}"]
         )
-        # dollar amount + lock in one row
         col1, col2 = st.columns([3, 1])
         with col1:
             dollars = pct / 100.0 * TOTAL_EQUITY
             st.write(f"→ ${dollars:,.0f}")
         with col2:
-            st.checkbox(
-                label="🔒",
-                key=f"lock_{k}"
-            )
+            st.checkbox("🔒", key=f"lock_{k}")
 
-# build final allocation dicts
 alloc_pct = {k: st.session_state[f"alloc_{k}"] / 100.0 for k in dst_keys}
 allocation_dollars = {k: alloc_pct[k] * TOTAL_EQUITY for k in dst_keys}
 
@@ -186,45 +178,79 @@ dst_cfs = {
 # ───────────────────────────────────────────────────────────────────────────────
 # Portfolio-level aggregates
 # ───────────────────────────────────────────────────────────────────────────────
-max_len           = max(len(cf) for cf in dst_cfs.values())
-port_cf           = [sum((cf[i] if i < len(cf) else 0) for cf in dst_cfs.values())
-                     for i in range(max_len)]
+max_len = max(len(cf) for cf in dst_cfs.values())
+port_cf = [
+    sum((cf[i] if i < len(cf) else 0) for cf in dst_cfs.values())
+    for i in range(max_len)
+]
 
+# IRR on the aggregated series
 if len(port_cf) > 1:
     port_irr_cf = [port_cf[0] + port_cf[1]] + port_cf[2:]
 else:
     port_irr_cf = port_cf
-portfolio_irr      = np_irr(port_irr_cf)
+portfolio_irr = np_irr(port_irr_cf)
 
-total_distribution = sum(port_cf)
-total_appreciation = sum(
-    dst_info[k]["equity"] * dst_controls[k]["sale_multiple"] - dst_info[k]["equity"]
+# total sale proceeds (S)
+sale_values = sum(
+    dst_info[k]["equity"] * dst_controls[k]["sale_multiple"]
     for k in dst_info
 )
-total_cash_flows   = total_distribution - total_appreciation
-hpr_multiple       = (TOTAL_EQUITY + total_distribution) / TOTAL_EQUITY
+
+# extract sum of periodic distributions (D)
+# since sum(port_cf) = -TOTAL_EQUITY + D + S
+distribution_sum = sum(port_cf) + TOTAL_EQUITY - sale_values
+
+# total distributions = D + S
+total_distribution = distribution_sum + sale_values
+
+# total appreciation = S – initial equity
+total_appreciation = sale_values - TOTAL_EQUITY
+
+# total cash flows = just the periodic distributions (D)
+total_cash_flows = distribution_sum
+
+# MOIC = (D + S) / initial equity
+moic = (distribution_sum + sale_values) / TOTAL_EQUITY
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Charts
 # ───────────────────────────────────────────────────────────────────────────────
-years     = list(range(1, HOLD_YEARS + 1))
+years = list(range(1, HOLD_YEARS + 1))
+
+# annual periodic distributions (for chart 1)
 dist_vals = [
     sum(
         dst_info[k]["equity"] * dst_info[k]["perc"].get(
             yr, dst_info[k]["perc"][max(dst_info[k]["perc"])]
         )
-        for k in dst_info if yr <= dst_controls[k]["sale_year"]
+        for k in dst_info
+        if yr <= dst_controls[k]["sale_year"]
     )
     for yr in years
 ]
 
-col1, col2 = st.columns(2)
+# build per-year total (periodic + sale proceeds in that year)
+annual_dist_and_sale_vals = [
+    port_cf[i] if i < len(port_cf) else 0
+    for i in range(1, HOLD_YEARS + 1)
+]
+
+# cumulative periodic distributions
+cum_cashflow = np.cumsum(dist_vals)
+# cumulative distributions + sale
+cum_dist_and_sale_vals = np.cumsum(annual_dist_and_sale_vals)
+
+col1, col2, col3 = st.columns(3)
 with col1:
-    st.subheader("Annual Distributions")
+    st.subheader("Annual Cash Flow")
     st.line_chart(pd.Series(dist_vals, index=years))
 with col2:
+    st.subheader("Cumulative Cash Flow")
+    st.line_chart(pd.Series(cum_cashflow, index=years))
+with col3:
     st.subheader("Cumulative Distributions")
-    st.line_chart(pd.Series(np.cumsum(dist_vals), index=years))
+    st.line_chart(pd.Series(cum_dist_and_sale_vals, index=years))
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Tables
@@ -232,21 +258,21 @@ with col2:
 tbl1, tbl2 = st.columns(2)
 
 with tbl1:
-    st.subheader("Portfolio Summary ($)")
+    st.subheader("Portfolio Summary")
     summary_df = pd.DataFrame({
-        "IRR":                  [portfolio_irr],
-        "Total Dist. (net)":    [total_distribution],
-        "Total Appreciation":   [total_appreciation],
-        "Total Cash Flows":     [total_cash_flows],
-        "HPR Multiple":         [hpr_multiple]
+        "IRR":                 [portfolio_irr],
+        "Total Distributions": [total_distribution],
+        "Total Appreciation":  [total_appreciation],
+        "Total Cash Flows":    [total_cash_flows],
+        "MOIC":                [moic]
     }, index=["Portfolio"])
     st.dataframe(
         summary_df.style.format({
-            "IRR":                "{:.2%}",
-            "Total Dist. (net)":  "${:,.0f}",
-            "Total Appreciation": "${:,.0f}",
-            "Total Cash Flows":   "${:,.0f}",
-            "HPR Multiple":       "{:.2f}"
+            "IRR":                 "{:.2%}",
+            "Total Distributions": "${:,.0f}",
+            "Total Appreciation":  "${:,.0f}",
+            "Total Cash Flows":    "${:,.0f}",
+            "MOIC":                "{:.2f}"
         }),
         use_container_width=True
     )
@@ -266,10 +292,10 @@ with tbl2:
 
         if equity <= 0:
             appreciation = 0.0
-            cagr         = float("nan")
+            cagr = float("nan")
         else:
             appreciation = equity * dst_controls[k]["sale_multiple"] - equity
-            cagr         = dst_controls[k]["sale_multiple"] ** (1 / yrs) - 1
+            cagr = dst_controls[k]["sale_multiple"] ** (1 / yrs) - 1
 
         perf.append({
             "IRR":              irr,
@@ -288,15 +314,15 @@ with tbl2:
     )
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Year-by-Year Cash-Flows
+# Year-by-Year DST Cash-Flows
 # ───────────────────────────────────────────────────────────────────────────────
-st.subheader("Year-by-Year DST Cash-Flows")
+st.subheader("Year-by-Year DST Distributions")
 cf_rows = {
     dst_info[k]["name"]:
         [dst_cfs[k][i] if i < len(dst_cfs[k]) else 0 for i in years]
     for k in dst_info
 }
-cf_df          = pd.DataFrame(cf_rows, index=[f"Year {y}" for y in years])
+cf_df = pd.DataFrame(cf_rows, index=[f"Year {y}" for y in years])
 cf_df["Total"] = cf_df.sum(axis=1)
 cf_df.loc["Total"] = cf_df.sum(numeric_only=True)
 
@@ -312,7 +338,7 @@ st.dataframe(
 secret_text = st.secrets["secret_text"]["text"]
 st.markdown(
     f"""
-    <div style="font-size: 0.5rem; color: grey; font-style: italic; margin-top: 0rem; line-height: 1;">
+    <div style="font-size: 0.6rem; color: grey; font-style: normal; margin-top: 0rem; line-height: 1;">
     {secret_text.replace('\n', '<br>')}
     </div>
     """,
