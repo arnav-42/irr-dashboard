@@ -7,13 +7,13 @@ All proprietary investment information (DST names, equity, etc) is hidden server
 To configure this information, include the following in your `secrets.toml` file:
 ```
 [auth]
-password = "password_here"
+password = "password123"
 
-[dstxyz]
-name   = "DSTxyz"
+[dst1]
+name   = "DST1"
 equity = 42 # initial $
 
-[dstxyz.perc] # annual dist. %
+[dst1.perc] # annual dist. %
 1  = 0.42
 2 = 0.042
 3 = 4.2
